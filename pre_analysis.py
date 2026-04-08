@@ -43,6 +43,10 @@ def round_value(value: Any, digits: int = 2) -> Any:
     return value
 
 
+def clean_score(value: Any, digits: int = 2) -> float:
+    return round(float(value), digits)
+
+
 def to_serializable_records(frame: pd.DataFrame, limit: int | None = None) -> list[dict[str, Any]]:
     if frame.empty:
         return []
@@ -219,6 +223,132 @@ def compute_delay_distribution(delay: pd.Series | None) -> list[dict[str, Any]]:
     return rows
 
 
+def compute_delay_jump_events(
+    frame: pd.DataFrame,
+    trip_col: str | None,
+    stop_sequence_col: str | None,
+    delay_col: str | None,
+    stop_col: str | None,
+) -> pd.DataFrame:
+    if not trip_col or not stop_sequence_col or not delay_col:
+        return pd.DataFrame()
+
+    working_columns = [trip_col, stop_sequence_col, delay_col]
+    if stop_col:
+        working_columns.append(stop_col)
+
+    working = frame[working_columns].copy()
+    working[stop_sequence_col] = pd.to_numeric(working[stop_sequence_col], errors="coerce")
+    working[delay_col] = pd.to_numeric(working[delay_col], errors="coerce")
+    working = working.dropna(subset=[trip_col, stop_sequence_col, delay_col])
+    if working.empty:
+        return pd.DataFrame()
+
+    working = working.sort_values([trip_col, stop_sequence_col]).copy()
+    working["prev_delay"] = working.groupby(trip_col)[delay_col].shift(1)
+    working["prev_sequence"] = working.groupby(trip_col)[stop_sequence_col].shift(1)
+    if stop_col:
+        working["prev_stop_id"] = working.groupby(trip_col)[stop_col].shift(1)
+        working["current_stop_id"] = working[stop_col]
+    else:
+        working["prev_stop_id"] = ""
+        working["current_stop_id"] = ""
+
+    working["delay_jump_min"] = working[delay_col] - working["prev_delay"]
+    working["sequence_gap"] = working[stop_sequence_col] - working["prev_sequence"]
+
+    jump_events = working[
+        working["prev_delay"].notna()
+        & working["delay_jump_min"].notna()
+        & working["sequence_gap"].eq(1)
+        & working["delay_jump_min"].gt(0)
+    ].copy()
+
+    if jump_events.empty:
+        return pd.DataFrame()
+
+    jump_events["severity"] = pd.cut(
+        jump_events["delay_jump_min"],
+        bins=[0, 3, 6, 10, float("inf")],
+        labels=["minor", "moderate", "major", "critical"],
+        include_lowest=False,
+    ).astype(str)
+    jump_events["segment_label"] = jump_events.apply(
+        lambda row: (
+            f"{row[trip_col]}: {row['prev_stop_id']} -> {row['current_stop_id']}"
+            if stop_col
+            else f"{row[trip_col]}: seq {int(row['prev_sequence'])} -> {int(row[stop_sequence_col])}"
+        ),
+        axis=1,
+    )
+
+    return jump_events[
+        [
+            trip_col,
+            "prev_stop_id",
+            "current_stop_id",
+            "prev_delay",
+            delay_col,
+            "delay_jump_min",
+            "severity",
+            "segment_label",
+        ]
+    ].rename(
+        columns={
+            trip_col: "trip_id",
+            delay_col: "current_delay",
+        }
+    ).sort_values(["delay_jump_min", "trip_id"], ascending=[False, True])
+
+
+def compute_focus_trip_profiles(
+    frame: pd.DataFrame,
+    trip_col: str | None,
+    stop_sequence_col: str | None,
+    delay_col: str | None,
+    stop_col: str | None,
+    jump_events: pd.DataFrame,
+    top_n: int = 4,
+) -> pd.DataFrame:
+    if not trip_col or not stop_sequence_col or not delay_col:
+        return pd.DataFrame()
+
+    if jump_events.empty:
+        return pd.DataFrame()
+
+    focus_trips = jump_events["trip_id"].dropna().astype(str).drop_duplicates().head(top_n).tolist()
+    if not focus_trips:
+        return pd.DataFrame()
+
+    working_columns = [trip_col, stop_sequence_col, delay_col]
+    if stop_col:
+        working_columns.append(stop_col)
+
+    working = frame[working_columns].copy()
+    working = working[working[trip_col].astype(str).isin(focus_trips)].copy()
+    if working.empty:
+        return pd.DataFrame()
+
+    working[stop_sequence_col] = pd.to_numeric(working[stop_sequence_col], errors="coerce")
+    working[delay_col] = pd.to_numeric(working[delay_col], errors="coerce")
+    working = working.dropna(subset=[trip_col, stop_sequence_col, delay_col])
+    if working.empty:
+        return pd.DataFrame()
+
+    working = working.sort_values([trip_col, stop_sequence_col]).copy()
+    working["trip_id"] = working[trip_col].astype(str)
+    working["stop_sequence"] = working[stop_sequence_col].astype(int)
+    working["delay_min"] = working[delay_col]
+    if stop_col:
+        working["stop_id"] = working[stop_col].astype(str)
+        working["stop_label"] = working["stop_id"] + " (" + working["stop_sequence"].astype(str) + ")"
+    else:
+        working["stop_id"] = ""
+        working["stop_label"] = "Seq " + working["stop_sequence"].astype(str)
+
+    return working[["trip_id", "stop_sequence", "stop_id", "stop_label", "delay_min"]]
+
+
 def compute_duplicate_key_info(
     frame: pd.DataFrame, dimensions: dict[str, str | None]
 ) -> tuple[list[str], int]:
@@ -310,6 +440,85 @@ def build_hour_summary(
     return summary
 
 
+def build_time_window_summary(
+    frame: pd.DataFrame,
+    parsed_time: pd.Series | None,
+    delay_column: str | None,
+    outlier_mask: pd.Series | None,
+    freq: str = "15min",
+) -> pd.DataFrame:
+    if parsed_time is None or delay_column is None:
+        return pd.DataFrame()
+
+    working = pd.DataFrame(
+        {
+            "time_window": parsed_time.dt.floor(freq),
+            "delay_min": pd.to_numeric(frame[delay_column], errors="coerce"),
+            "is_outlier": outlier_mask if outlier_mask is not None else False,
+        }
+    ).dropna(subset=["time_window"])
+    working["is_on_time"] = working["delay_min"].le(5)
+
+    summary = (
+        working.groupby("time_window")
+        .agg(
+            avg_delay=("delay_min", "mean"),
+            otp_percent=("is_on_time", lambda values: 100 * values.mean()),
+            record_count=("delay_min", "size"),
+            outlier_count=("is_outlier", "sum"),
+        )
+        .reset_index()
+        .sort_values("time_window")
+    )
+    if summary.empty:
+        return summary
+
+    summary["time_label"] = summary["time_window"].dt.strftime("%H:%M")
+    return summary
+
+
+def build_station_hour_summary(
+    frame: pd.DataFrame,
+    stop_col: str | None,
+    parsed_time: pd.Series | None,
+    delay_col: str | None,
+) -> pd.DataFrame:
+    if stop_col is None or parsed_time is None or delay_col is None:
+        return pd.DataFrame()
+
+    working = pd.DataFrame(
+        {
+            "stop_id": frame[stop_col].astype(str),
+            "hour": parsed_time.dt.hour,
+            "delay_min": pd.to_numeric(frame[delay_col], errors="coerce"),
+        }
+    ).dropna(subset=["stop_id", "hour"])
+    if working.empty:
+        return pd.DataFrame()
+
+    working["is_on_time"] = working["delay_min"].le(5)
+    summary = (
+        working.groupby(["stop_id", "hour"])
+        .agg(
+            avg_delay=("delay_min", "mean"),
+            otp_percent=("is_on_time", lambda values: 100 * values.mean()),
+            record_count=("delay_min", "size"),
+        )
+        .reset_index()
+    )
+    if summary.empty:
+        return summary
+
+    station_order = (
+        summary.groupby("stop_id")
+        .agg(avg_delay=("avg_delay", "mean"), record_count=("record_count", "sum"))
+        .sort_values(["avg_delay", "record_count"], ascending=[False, False])
+        .head(10)
+        .index
+    )
+    return summary[summary["stop_id"].isin(station_order)].copy()
+
+
 def build_direction_summary(
     frame: pd.DataFrame, direction_col: str | None, delay_col: str | None
 ) -> pd.DataFrame:
@@ -362,6 +571,7 @@ def build_diagnostic_checks(
 ) -> dict[str, dict[str, Any]]:
     row_count = metrics["record_count"]
     avg_delay = metrics.get("avg_delay", 0.0) or 0.0
+    max_delay = metrics.get("max_delay", 0.0) or 0.0
     otp_percent = metrics.get("otp_percent", 0.0) or 0.0
     outlier_share = metrics.get("outlier_share", 0.0) or 0.0
     missingness_rate = quality["missing_value_rate"]
@@ -375,6 +585,7 @@ def build_diagnostic_checks(
 
     elevated_station_share = 0.0
     repeated_station_issue_share = 0.0
+    concentrated_station_share = 0.0
     if not station_summary.empty:
         elevated_station_share = float((station_summary["avg_delay"] > 5).mean())
         strong_station_pattern = station_summary[
@@ -382,6 +593,9 @@ def build_diagnostic_checks(
             & (station_summary["record_count"] >= 3)
         ]
         repeated_station_issue_share = len(strong_station_pattern) / max(len(station_summary), 1)
+        concentrated_station_share = float(
+            (station_summary["avg_delay"] > max(avg_delay + 1.0, 3.5)).mean()
+        )
 
     gapped_trip_share = 0.0
     if not missing_stop_summary.empty:
@@ -394,12 +608,22 @@ def build_diagnostic_checks(
         ]["count"].sum()
         non_matched_share = 1 - (matched_rows / max(row_count, 1))
 
+    extreme_outlier_bonus = 0.18 if max_delay >= 15 and otp_percent >= 95 else 0.0
     sensor_score = min(
         1.0, max(outlier_share * 10, 0) * max(0.2, 1 - elevated_trip_share) * (1 if otp_percent >= 80 else 0.7)
     )
+    sensor_score = min(
+        1.0,
+        (
+            (outlier_share * 14) + extreme_outlier_bonus
+        )
+        * max(0.25, 1 - elevated_trip_share)
+        * max(0.25, 1 - (gapped_trip_share * 2))
+        * (1.0 if non_matched_share < 0.2 else 0.7),
+    )
     missing_record_score = min(
         1.0,
-        (gapped_trip_share * 1.4)
+        (gapped_trip_share * 2.1)
         + (missingness_rate * 2.2)
         + (duplicate_row_rate * 1.2)
         + (bad_datetime_rate * 1.2),
@@ -407,16 +631,28 @@ def build_diagnostic_checks(
     join_mapping_score = min(1.0, non_matched_share * 1.9)
     service_pattern_score = min(
         1.0,
-        (repeated_station_issue_share * 1.8)
-        + (0.15 if 1.5 <= avg_delay <= 6 else 0)
+        (repeated_station_issue_share * 1.2)
+        + (
+            concentrated_station_share
+            * 1.5
+            * max(0.3, 1 - elevated_trip_share)
+        )
+        + (0.15 if 1.5 <= avg_delay <= 5.5 and otp_percent >= 80 else 0)
         + (0.1 if 0 < non_matched_share < 0.35 else 0),
     )
-    operational_score = min(
-        1.0,
+    operational_base = (
         (elevated_trip_share * 0.45)
         + (elevated_station_share * 0.25)
-        + ((100 - otp_percent) / 100 * 0.4)
-        + min(avg_delay / 12, 0.35),
+        + ((100 - otp_percent) / 100 * 0.35)
+        + min(avg_delay / 14, 0.25)
+    )
+    operational_penalty = (non_matched_share * 0.7) + (gapped_trip_share * 0.35)
+    operational_score = max(
+        0.0,
+        min(
+            1.0,
+            operational_base - operational_penalty,
+        ),
     )
     insufficient_score = 0.05
     if not dimensions["delay_min"]:
@@ -428,16 +664,16 @@ def build_diagnostic_checks(
 
     return {
         "sensor_anomaly": {
-            "score": round(sensor_score, 2),
-            "triggered": sensor_score >= 0.5,
+            "score": clean_score(sensor_score),
+            "triggered": bool(sensor_score >= 0.5),
             "evidence": [
                 f"Outlier share: {outlier_share:.1%}",
                 f"Broadly elevated trips: {elevated_trip_share:.1%}",
             ],
         },
         "missing_records": {
-            "score": round(missing_record_score, 2),
-            "triggered": missing_record_score >= 0.5,
+            "score": clean_score(missing_record_score),
+            "triggered": bool(missing_record_score >= 0.5),
             "evidence": [
                 f"Missing-value rate: {missingness_rate:.1%}",
                 f"Trips with stop-sequence gaps: {gapped_trip_share:.1%}",
@@ -445,21 +681,22 @@ def build_diagnostic_checks(
             ],
         },
         "join_mapping_quality": {
-            "score": round(join_mapping_score, 2),
-            "triggered": join_mapping_score >= 0.5,
+            "score": clean_score(join_mapping_score),
+            "triggered": bool(join_mapping_score >= 0.5),
             "evidence": [f"Non-matched share: {non_matched_share:.1%}"],
         },
         "service_pattern_mismatch": {
-            "score": round(service_pattern_score, 2),
-            "triggered": service_pattern_score >= 0.5,
+            "score": clean_score(service_pattern_score),
+            "triggered": bool(service_pattern_score >= 0.5),
             "evidence": [
                 f"Repeated station-level pattern share: {repeated_station_issue_share:.1%}",
+                f"Concentrated station share: {concentrated_station_share:.1%}",
                 f"Average delay: {avg_delay:.2f} min",
             ],
         },
         "operational_disruption": {
-            "score": round(operational_score, 2),
-            "triggered": operational_score >= 0.5,
+            "score": clean_score(operational_score),
+            "triggered": bool(operational_score >= 0.5),
             "evidence": [
                 f"Elevated trip share: {elevated_trip_share:.1%}",
                 f"Elevated station share: {elevated_station_share:.1%}",
@@ -467,25 +704,26 @@ def build_diagnostic_checks(
             ],
         },
         "insufficient_evidence": {
-            "score": round(insufficient_score, 2),
-            "triggered": insufficient_score >= 0.75,
+            "score": clean_score(insufficient_score),
+            "triggered": bool(insufficient_score >= 0.75),
             "evidence": [
                 f"Row count: {row_count}",
                 f"Delay column available: {bool(dimensions['delay_min'])}",
             ],
         },
         "quality_pressure": {
-            "score": round(
+            "score": clean_score(
                 min(
                     1.0,
                     (missingness_rate * 2.5)
                     + (duplicate_row_rate * 1.6)
                     + (invalid_value_rate * 1.6)
                     + (bad_datetime_rate * 1.4),
-                ),
-                2,
+                )
             ),
-            "triggered": (missingness_rate + duplicate_row_rate + invalid_value_rate) >= 0.2,
+            "triggered": bool(
+                (missingness_rate + duplicate_row_rate + invalid_value_rate) >= 0.2
+            ),
             "evidence": [
                 f"Duplicate row rate: {duplicate_row_rate:.1%}",
                 f"Invalid-value rate: {invalid_value_rate:.1%}",
@@ -499,16 +737,23 @@ def build_rule_based_diagnosis(
 ) -> dict[str, Any]:
     insufficient_score = diagnostic_checks["insufficient_evidence"]["score"]
     issue_scores = {
-        "data_quality": min(
-            1.0,
-            (diagnostic_checks["missing_records"]["score"] * 0.65)
-            + (diagnostic_checks["quality_pressure"]["score"] * 0.35),
+        "data_quality": max(
+            diagnostic_checks["missing_records"]["score"],
+            min(
+                1.0,
+                (diagnostic_checks["missing_records"]["score"] * 0.8)
+                + (diagnostic_checks["quality_pressure"]["score"] * 0.2),
+            ),
         ),
         "measurement_logic": min(
             1.0,
-            (diagnostic_checks["sensor_anomaly"]["score"] * 0.3)
-            + (diagnostic_checks["join_mapping_quality"]["score"] * 0.4)
-            + (diagnostic_checks["service_pattern_mismatch"]["score"] * 0.3),
+            max(
+                diagnostic_checks["join_mapping_quality"]["score"],
+                (diagnostic_checks["sensor_anomaly"]["score"] * 1.0)
+                + (diagnostic_checks["service_pattern_mismatch"]["score"] * 0.25),
+                (diagnostic_checks["service_pattern_mismatch"]["score"] * 0.95)
+                + (diagnostic_checks["sensor_anomaly"]["score"] * 0.15),
+            ),
         ),
         "real_operations": diagnostic_checks["operational_disruption"]["score"],
         "insufficient_evidence": insufficient_score,
@@ -530,10 +775,21 @@ def build_rule_based_diagnosis(
     confidence = max(0.35, min(0.95, top_score * 0.75 + (top_score - runner_up) * 0.5 + 0.25))
 
     explanations = {
-        "data_quality": "The strongest signals point to feed completeness or data hygiene issues before we get to true service performance.",
-        "measurement_logic": "The evidence looks more like a measurement or matching artifact than a broad service problem.",
-        "real_operations": "Delay is elevated across a wide portion of trips or stations, which is more consistent with a real operational slowdown.",
-        "insufficient_evidence": "There is not enough reliable structure in the file to make a strong diagnosis yet.",
+        "data_quality": (
+            "Python found evidence of incomplete or unreliable records. "
+            "Taken together, this points more to data quality problems than true service performance."
+        ),
+        "measurement_logic": (
+            "Python found patterns that look more like matching, mapping, or measurement artifacts than a broad operating problem. "
+            "Taken together, this points to measurement logic."
+        ),
+        "real_operations": (
+            "Python found delay elevated across a broader portion of the network rather than in a few isolated records. "
+            "Taken together, this points to a real operational disruption."
+        ),
+        "insufficient_evidence": (
+            "Python found some signals, but the file does not provide enough reliable structure to support a strong root-cause call yet."
+        ),
     }
 
     next_steps = {
@@ -559,15 +815,29 @@ def build_rule_based_diagnosis(
         ],
     }
 
-    top_hypotheses = []
-    for issue_type, score in sorted_scores[:3]:
-        if score <= 0.15:
-            continue
-        label = issue_type.replace("_", " ").title()
-        top_hypotheses.append(f"{label} signal with score {score:.2f}")
-
-    if not top_hypotheses:
-        top_hypotheses = ["Not enough evidence to surface strong hypotheses yet."]
+    if likely_issue_type == "data_quality":
+        top_hypotheses = [
+            "Missing values, stop-sequence gaps, or broken datetime parsing suggest the feed may be incomplete.",
+            "Data hygiene issues should be resolved before interpreting OTP as a true service outcome.",
+            "Observed delay patterns may be partly caused by dropped or malformed records.",
+        ]
+    elif likely_issue_type == "measurement_logic":
+        top_hypotheses = [
+            "The pattern looks concentrated or abrupt rather than broad-based, which is consistent with a logic or matching artifact.",
+            "Schedule joins or stop-pattern alignment may be distorting the apparent delay story.",
+            "A subset of rows may be driving the anomaly instead of a true network slowdown.",
+        ]
+    elif likely_issue_type == "real_operations":
+        top_hypotheses = [
+            "Delay appears elevated across multiple parts of the network rather than in a few isolated records.",
+            "The OTP drop is more consistent with a real operating slowdown than with a narrow data artifact.",
+            "The highest-impact stations, trains, and hours should be reviewed as the operational concentration points.",
+        ]
+    else:
+        top_hypotheses = [
+            "The file does not provide enough reliable structure for a confident root-cause explanation.",
+            "More complete identifiers or time context would make the diagnosis stronger.",
+        ]
 
     return {
         "likely_issue_type": likely_issue_type,
@@ -575,7 +845,7 @@ def build_rule_based_diagnosis(
         "short_explanation": explanations[likely_issue_type],
         "top_hypotheses": top_hypotheses,
         "recommended_next_steps": next_steps[likely_issue_type],
-        "issue_scores": {key: round(value, 2) for key, value in issue_scores.items()},
+        "issue_scores": {key: clean_score(value) for key, value in issue_scores.items()},
         "otp_percent": metrics.get("otp_percent"),
     }
 
@@ -641,10 +911,31 @@ def run_pre_analysis(frame: pd.DataFrame, file_name: str) -> dict[str, Any]:
     hour_summary = build_hour_summary(
         working, parsed_time, dimensions["delay_min"], outlier_mask if delay_col else None
     )
+    time_window_summary = build_time_window_summary(
+        working, parsed_time, dimensions["delay_min"], outlier_mask if delay_col else None
+    )
     direction_summary = build_direction_summary(
         working, dimensions["direction"], dimensions["delay_min"]
     )
+    station_hour_summary = build_station_hour_summary(
+        working, dimensions["stop_id"], parsed_time, dimensions["delay_min"]
+    )
     match_status_summary = compute_match_status_summary(working, dimensions["match_status"])
+    delay_jump_events = compute_delay_jump_events(
+        working,
+        dimensions["trip_id"],
+        dimensions["stop_sequence"],
+        dimensions["delay_min"],
+        dimensions["stop_id"],
+    )
+    focus_trip_profiles = compute_focus_trip_profiles(
+        working,
+        dimensions["trip_id"],
+        dimensions["stop_sequence"],
+        dimensions["delay_min"],
+        dimensions["stop_id"],
+        delay_jump_events,
+    )
 
     metrics = {
         "record_count": int(len(working)),
@@ -697,10 +988,12 @@ def run_pre_analysis(frame: pd.DataFrame, file_name: str) -> dict[str, Any]:
     )
     evidence_summary = build_rule_based_diagnosis(metrics, diagnostic_checks)
 
-    avg_delay_by_hour = hour_summary[["hour", "avg_delay", "record_count"]].copy()
-    if not avg_delay_by_hour.empty and avg_delay_by_hour["avg_delay"].notna().any():
-        spike_threshold = avg_delay_by_hour["avg_delay"].mean() + avg_delay_by_hour["avg_delay"].std()
-        avg_delay_by_hour["is_spike"] = avg_delay_by_hour["avg_delay"] > spike_threshold
+    avg_delay_by_time = time_window_summary[
+        ["time_label", "avg_delay", "record_count", "otp_percent", "outlier_count"]
+    ].copy() if not time_window_summary.empty else pd.DataFrame()
+    if not avg_delay_by_time.empty and avg_delay_by_time["avg_delay"].notna().any():
+        spike_threshold = avg_delay_by_time["avg_delay"].mean() + avg_delay_by_time["avg_delay"].std()
+        avg_delay_by_time["is_spike"] = avg_delay_by_time["avg_delay"] > spike_threshold
 
     return {
         "file_info": {
@@ -725,8 +1018,12 @@ def run_pre_analysis(frame: pd.DataFrame, file_name: str) -> dict[str, Any]:
         "diagnostic_checks": diagnostic_checks,
         "chart_ready_outputs": {
             "delay_distribution": compute_delay_distribution(delay_series),
+            "delay_jump_events": to_serializable_records(delay_jump_events, limit=15),
+            "focus_trip_profiles": to_serializable_records(focus_trip_profiles, limit=80),
             "avg_delay_by_trip": to_serializable_records(
-                trip_summary[["group_value", "avg_delay", "record_count"]]
+                trip_summary[
+                    ["group_value", "avg_delay", "record_count", "otp_percent", "outlier_count", "missing_stops"]
+                ]
                 .rename(columns={"group_value": "trip_id"})
                 .sort_values("avg_delay", ascending=False),
                 limit=15,
@@ -734,16 +1031,23 @@ def run_pre_analysis(frame: pd.DataFrame, file_name: str) -> dict[str, Any]:
             if not trip_summary.empty
             else [],
             "avg_delay_by_station": to_serializable_records(
-                station_summary[["group_value", "avg_delay", "record_count"]]
+                station_summary[
+                    ["group_value", "avg_delay", "record_count", "otp_percent", "outlier_count"]
+                ]
                 .rename(columns={"group_value": "stop_id"})
                 .sort_values("avg_delay", ascending=False),
                 limit=15,
             )
             if not station_summary.empty
             else [],
-            "avg_delay_by_hour": to_serializable_records(avg_delay_by_hour),
+            "avg_delay_by_hour": to_serializable_records(avg_delay_by_time),
+            "station_hour_heatmap": to_serializable_records(
+                station_hour_summary.sort_values(["stop_id", "hour"])
+            )
+            if not station_hour_summary.empty
+            else [],
             "otp_by_trip": to_serializable_records(
-                trip_summary[["group_value", "otp_percent"]]
+                trip_summary[["group_value", "otp_percent", "record_count", "avg_delay", "outlier_count"]]
                 .rename(columns={"group_value": "trip_id"})
                 .sort_values("otp_percent"),
                 limit=15,
@@ -751,7 +1055,7 @@ def run_pre_analysis(frame: pd.DataFrame, file_name: str) -> dict[str, Any]:
             if not trip_summary.empty
             else [],
             "otp_by_station": to_serializable_records(
-                station_summary[["group_value", "otp_percent"]]
+                station_summary[["group_value", "otp_percent", "record_count", "avg_delay", "outlier_count"]]
                 .rename(columns={"group_value": "stop_id"})
                 .sort_values("otp_percent"),
                 limit=15,
