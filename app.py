@@ -1444,6 +1444,7 @@ def render_overview(pre_analysis: dict, diagnosis: dict) -> None:
         unsafe_allow_html=True,
     )
     render_metric_grid(pre_analysis, diagnosis)
+    st.markdown("<div style='height: 0.65rem;'></div>", unsafe_allow_html=True)
 
     left, right = st.columns([1.05, 0.95])
     with left:
