@@ -159,7 +159,34 @@ def inject_css() -> None:
             max-width: 900px;
             font-size: 1rem;
             line-height: 1.7;
-            margin-bottom: 0;
+            margin-bottom: 1rem;
+        }
+        .hero-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-top: 0.2rem;
+        }
+        .hero-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            padding: 0.7rem 1rem;
+            border-radius: 14px;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            background: rgba(15, 23, 42, 0.58);
+            color: #e2e8f0;
+            font-size: 0.92rem;
+            font-weight: 700;
+            text-decoration: none;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+        .hero-link:hover {
+            transform: translateY(-1px);
+            border-color: rgba(96, 165, 250, 0.42);
+            background: rgba(30, 41, 59, 0.78);
+            color: #f8fafc;
         }
         .section-card {
             border: 1px solid rgba(148, 163, 184, 0.12);
@@ -449,6 +476,10 @@ def render_hero() -> None:
                 or a broader network slowdown. It works by running a Python pre-analysis first, then sending the structured
                 findings to Gemini for interpretation.
             </p>
+            <div class="hero-links">
+                <a class="hero-link" href="https://github.com/nniishhh/subway-otp-diagnostics" target="_blank" rel="noopener noreferrer">View Source Code</a>
+                <a class="hero-link" href="https://www.youtube.com/watch?v=kLziIIrv_NA" target="_blank" rel="noopener noreferrer">Watch Demo Video</a>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
