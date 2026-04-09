@@ -15,6 +15,7 @@ venv/
 # Local OS files
 .DS_Store
 ~$*.xlsx
+.cursor/
 
 # Generated data exports
 exports/

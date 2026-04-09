@@ -14,40 +14,74 @@ from prompts import build_diagnosis_prompt
 
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_DIR = BASE_DIR / "sample_data"
-ISSUE_META = {
-    "data_quality": {"label": "Data Quality", "class": "badge-quality"},
-    "measurement_logic": {"label": "Measurement Logic", "class": "badge-logic"},
-    "real_operations": {"label": "Real Operations", "class": "badge-ops"},
-    "insufficient_evidence": {"label": "Insufficient Evidence", "class": "badge-evidence"},
-}
 SAMPLE_DESCRIPTIONS = {
-    "01_sensor_anomaly.csv": [
-        "Mostly normal service overall",
-        "A few trains show abrupt one-stop delay jumps",
-        "Best for testing sensor or measurement anomalies",
-    ],
-    "02_service_pattern_mismatch.csv": [
-        "Delay spikes repeat at similar mid-line stations",
-        "Pattern appears across multiple trains",
-        "Best for testing stop-pattern or service-pattern mismatch",
-    ],
-    "03_join_mapping_issue.csv": [
-        "Schedule matching quality breaks down",
-        "A visible share of rows are not matched cleanly",
-        "Best for testing join or mapping distortion in OTP analysis",
-    ],
-    "04_missing_records.csv": [
-        "Some trips lose rows entirely",
-        "Stop sequences become incomplete",
-        "Best for testing feed dropout and partial trip coverage",
-    ],
-    "05_true_operational_disruption.csv": [
-        "Delay rises broadly across the network",
-        "Stations, hours, and trains are all affected",
-        "Best for testing a true operational slowdown",
-    ],
+    "01_isolated_extreme_delays.csv": {
+        "title": "01 Isolated Extreme Delays",
+        "summary": "A small number of stops show unusually high delays (10+ min), while most remain normal.",
+        "look_for": "A few sharp spikes, not a system-wide pattern",
+    },
+    "02_recurring_bottleneck.csv": {
+        "title": "02 Recurring Bottleneck",
+        "summary": "Certain stations consistently experience higher delays across multiple trips.",
+        "look_for": "The same stops showing repeated delay patterns",
+    },
+    "03_schedule_vs_actual_mismatch.csv": {
+        "title": "03 Schedule Vs Actual Mismatch",
+        "summary": "Scheduled times and real train data do not align, creating artificial delay gaps.",
+        "look_for": "Unmatched records or inconsistent timing gaps",
+    },
+    "04_missing_trip_records.csv": {
+        "title": "04 Missing Trip Records",
+        "summary": "Some trips have incomplete stop sequences due to missing updates.",
+        "look_for": "Broken trip sequences or fewer stops than expected",
+    },
+    "05_network_wide_slowdown.csv": {
+        "title": "05 Network-Wide Slowdown",
+        "summary": "Delays are elevated across many trips and stations, indicating a real system issue.",
+        "look_for": "Widespread delays, not isolated spikes",
+    },
 }
 
+CHART_PALETTE = {
+    "core_scale": ["#13233d", "#1d4ed8", "#38bdf8", "#a5f3fc"],
+    "core_scale_stops": [
+        [0.0, "#13233d"],
+        [0.3, "#1d4ed8"],
+        [0.68, "#38bdf8"],
+        [1.0, "#a5f3fc"],
+    ],
+    "heatmap_scale_stops": [
+        [0.0, "#0f172a"],
+        [0.24, "#1e3a8a"],
+        [0.52, "#2563eb"],
+        [0.8, "#f59e0b"],
+        [1.0, "#ef4444"],
+    ],
+    "alert_scale": ["#7c2d12", "#c2410c", "#f59e0b", "#ef4444"],
+    "alert_scale_stops": [
+        [0.0, "#7c2d12"],
+        [0.35, "#c2410c"],
+        [0.7, "#f59e0b"],
+        [1.0, "#ef4444"],
+    ],
+    "distribution_scale_stops": [
+        [0.0, "#334155"],
+        [0.28, "#64748b"],
+        [0.62, "#f59e0b"],
+        [1.0, "#dc2626"],
+    ],
+    "otp_scale": ["#b91c1c", "#d97706", "#65a30d"],
+    "comparison": ["#93c5fd", "#22d3ee", "#fbbf24", "#34d399"],
+    "threshold": "rgba(245, 158, 11, 0.62)",
+    "spike": "#fbbf24",
+}
+
+SEVERITY_COLOR_MAP = {
+    "minor": "#38bdf8",
+    "moderate": "#fbbf24",
+    "major": "#f97316",
+    "critical": "#ef4444",
+}
 
 st.set_page_config(
     page_title="Diagnose Subway OTP Issues With Visualization And AI Analysis",
@@ -146,28 +180,34 @@ def inject_css() -> None:
         }
         .metric-card {
             border-radius: 18px;
-            padding: 0.8rem 0.9rem;
+            padding: 1rem 1.05rem;
             background: linear-gradient(180deg, rgba(28, 39, 61, 0.9), rgba(15, 23, 42, 0.8));
-            border: 1px solid rgba(148, 163, 184, 0.12);
+            border: 1px solid rgba(148, 163, 184, 0.14);
             box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
-            min-height: 84px;
+            min-height: 92px;
         }
         .metric-label {
             color: #94a3b8;
-            font-size: 0.72rem;
+            font-size: 0.7rem;
             text-transform: uppercase;
-            letter-spacing: 0.06em;
+            letter-spacing: 0.08em;
+            font-weight: 600;
         }
         .metric-value {
-            font-size: 1.22rem;
+            font-size: 1.32rem;
             font-weight: 800;
-            margin-top: 0.2rem;
+            margin-top: 0.28rem;
             color: #f8fafc;
+            line-height: 1.1;
         }
+        .metric-value-good { color: #4ade80; }
+        .metric-value-warn { color: #facc15; }
+        .metric-value-bad  { color: #f87171; }
         .metric-caption {
-            color: #cbd5e1;
-            font-size: 0.72rem;
-            margin-top: 0.18rem;
+            color: #94a3b8;
+            font-size: 0.74rem;
+            margin-top: 0.22rem;
+            line-height: 1.4;
         }
         .overview-panel {
             border: 1px solid rgba(148, 163, 184, 0.12);
@@ -203,59 +243,41 @@ def inject_css() -> None:
             border-color: rgba(96, 165, 250, 0.65);
             box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.25), 0 18px 36px rgba(0, 0, 0, 0.28);
         }
-        .sample-title {
+        .sample-group-title {
+            color: #e2e8f0;
             font-size: 1rem;
-            font-weight: 700;
-            margin-bottom: 0.45rem;
+            font-weight: 800;
+            letter-spacing: 0.03em;
+            margin: 0.4rem 0 0.2rem 0;
+        }
+        .sample-group-copy {
+            color: #cbd5e1;
+            font-size: 0.92rem;
+            line-height: 1.55;
+            margin-bottom: 0.85rem;
+            max-width: 900px;
+        }
+        .sample-title {
+            font-size: 1.02rem;
+            font-weight: 800;
+            margin-bottom: 0.55rem;
+            line-height: 1.35;
         }
         .sample-copy {
             color: #cbd5e1;
             font-size: 0.9rem;
-            line-height: 1.5;
+            line-height: 1.58;
         }
-        .sample-copy ul {
-            margin: 0.2rem 0 0 1rem;
-            padding: 0;
+        .sample-summary {
+            margin-bottom: 0.75rem;
         }
-        .sample-copy li {
-            color: #cbd5e1;
-            margin-bottom: 0.35rem;
-        }
-        .status-strip {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 0.8rem;
-            margin: 0.8rem 0 0.4rem 0;
-        }
-        .issue-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.45rem;
-            border-radius: 999px;
-            padding: 0.45rem 0.8rem;
-            font-size: 0.9rem;
-            font-weight: 700;
-        }
-        .badge-quality {
-            background: rgba(244, 114, 182, 0.14);
-            color: #f9a8d4;
-            border: 1px solid rgba(244, 114, 182, 0.26);
-        }
-        .badge-logic {
-            background: rgba(59, 130, 246, 0.14);
+        .sample-lookfor {
             color: #e2e8f0;
-            border: 1px solid rgba(59, 130, 246, 0.26);
+            font-size: 0.88rem;
+            line-height: 1.52;
         }
-        .badge-ops {
-            background: rgba(34, 197, 94, 0.14);
-            color: #86efac;
-            border: 1px solid rgba(34, 197, 94, 0.26);
-        }
-        .badge-evidence {
-            background: rgba(250, 204, 21, 0.14);
-            color: #fde68a;
-            border: 1px solid rgba(250, 204, 21, 0.26);
+        .sample-lookfor strong {
+            color: #f8fafc;
         }
         .insight-copy {
             color: #dbe4f0;
@@ -270,11 +292,15 @@ def inject_css() -> None:
             height: 100%;
         }
         .list-card ul {
-            margin: 0.1rem 0 0 1.1rem;
+            margin: 0.3rem 0 0 1.1rem;
         }
         .list-card li {
             color: #dbe4f0;
-            margin-bottom: 0.55rem;
+            margin-bottom: 0.75rem;
+            line-height: 1.6;
+        }
+        .list-card li:last-child {
+            margin-bottom: 0.2rem;
         }
         .pill-note {
             display: inline-block;
@@ -326,12 +352,19 @@ def inject_css() -> None:
         }
         .stTabs [data-baseweb="tab"] {
             border-radius: 12px;
-            color: #cbd5e1;
+            color: #e2e8f0;
             padding: 0.7rem 1rem;
+            font-weight: 600;
+            font-size: 0.95rem;
         }
         .stTabs [aria-selected="true"] {
-            background: rgba(59, 130, 246, 0.15);
+            background: rgba(59, 130, 246, 0.2);
             color: #eff6ff;
+            border: 1px solid rgba(96, 165, 250, 0.25);
+        }
+        .stTabs [aria-selected="false"]:hover {
+            background: rgba(148, 163, 184, 0.08);
+            color: #f1f5f9;
         }
         div[data-testid="stDataFrame"] {
             border-radius: 18px;
@@ -412,8 +445,9 @@ def render_hero() -> None:
             <h1 class="hero-title">Diagnose subway OTP issues with visualization and AI analysis.</h1>
             <p class="hero-copy">
                 This app analyzes subway on-time performance scenarios and helps explain whether the pattern looks like
-                a data quality issue, a measurement artifact, a real operational problem, or simply not enough evidence.
-                It works by running a Python pre-analysis first, then sending the structured findings to Vertex AI for interpretation.
+                isolated extreme delays, a recurring bottleneck, a schedule-vs-actual mismatch, missing trip records,
+                or a broader network slowdown. It works by running a Python pre-analysis first, then sending the structured
+                findings to Vertex AI for interpretation.
             </p>
         </div>
         """,
@@ -421,14 +455,25 @@ def render_hero() -> None:
     )
 
 
-def metric_card(label: str, value: str, caption: str) -> str:
+def metric_card(label: str, value: str, caption: str, value_class: str = "") -> str:
+    value_cls = f"metric-value {value_class}".strip()
     return f"""
     <div class="metric-card">
         <div class="metric-label">{label}</div>
-        <div class="metric-value">{value}</div>
+        <div class="{value_cls}">{value}</div>
         <div class="metric-caption">{caption}</div>
     </div>
     """
+
+
+def _otp_color_class(otp: float | None) -> str:
+    if otp is None:
+        return ""
+    if otp >= 85:
+        return "metric-value-good"
+    if otp >= 70:
+        return "metric-value-warn"
+    return "metric-value-bad"
 
 
 def render_metric_grid(pre_analysis: dict, diagnosis: dict) -> None:
@@ -439,46 +484,42 @@ def render_metric_grid(pre_analysis: dict, diagnosis: dict) -> None:
     outlier_count = metrics.get("outlier_count", 0)
     trip_count = metrics.get("trip_count")
     station_count = metrics.get("station_count")
-    issue_label = ISSUE_META.get(
-        diagnosis["likely_issue_type"], ISSUE_META["insufficient_evidence"]
-    )["label"]
-
     cards = [
         (
             "Rows",
             f"{pre_analysis['file_info']['row_count']:,}",
             "Records analyzed",
+            "",
         ),
         (
             "OTP",
             f"{otp_percent:.1f}%" if otp_percent is not None else "n/a",
-            "Using delay <= 5 min",
+            "Using delay \u2264 5 min",
+            _otp_color_class(otp_percent),
         ),
         (
             "Avg Delay",
             f"{avg_delay:.2f} min" if avg_delay is not None else "n/a",
             f"Max {max_delay:.1f} min" if max_delay is not None else "Average delay unavailable",
+            "",
         ),
         (
             "Outliers",
             f"{outlier_count:,}",
             "IQR-based delay outliers",
+            "",
         ),
         (
             "Trips / Stations",
             f"{trip_count or 'n/a'} / {station_count or 'n/a'}",
             "Unique IDs detected",
-        ),
-        (
-            "Likely Issue",
-            issue_label,
-            "Current diagnosis",
+            "",
         ),
     ]
-    columns = st.columns(6, gap="small")
-    for index, (label, value, caption) in enumerate(cards):
+    columns = st.columns(5, gap="small")
+    for index, (label, value, caption, value_class) in enumerate(cards):
         with columns[index]:
-            st.markdown(metric_card(label, value, caption), unsafe_allow_html=True)
+            st.markdown(metric_card(label, value, caption, value_class), unsafe_allow_html=True)
 
 
 def render_sample_selector() -> tuple[Path | None, bool]:
@@ -486,7 +527,7 @@ def render_sample_selector() -> tuple[Path | None, bool]:
     st.markdown(
         """
         <div class="pill-note" style="margin-top:-0.15rem;margin-bottom:1rem;">
-            Pick any scenario card below to run the analysis immediately. No extra step needed.
+            Pick one of the five scenario files below to run the analysis immediately.
         </div>
         """,
         unsafe_allow_html=True,
@@ -495,6 +536,7 @@ def render_sample_selector() -> tuple[Path | None, bool]:
     if not sample_files:
         st.info("No sample files found in sample_data.")
         return None, False
+    sample_lookup = {sample_file.name: sample_file for sample_file in sample_files}
 
     selected = st.session_state.get("selected_sample")
     analyze_requested = False
@@ -503,14 +545,21 @@ def render_sample_selector() -> tuple[Path | None, bool]:
         with columns[index % 3]:
             is_selected = selected == sample_file.name
             selected_class = "selected" if is_selected else ""
+            description = SAMPLE_DESCRIPTIONS.get(
+                sample_file.name,
+                {
+                    "title": sample_file.stem.replace("_", " ").title(),
+                    "summary": "Built-in scenario dataset.",
+                    "look_for": "A notable transit delay pattern in the visuals.",
+                },
+            )
             st.markdown(
                 f"""
                 <div class="sample-card {selected_class}">
-                    <div class="sample-title">{sample_file.stem.replace('_', ' ').title()}</div>
+                    <div class="sample-title">{description['title']}</div>
                     <div class="sample-copy">
-                        <ul>
-                            {''.join(f'<li>{item}</li>' for item in SAMPLE_DESCRIPTIONS.get(sample_file.name, ['Built-in scenario dataset.']))}
-                        </ul>
+                        <div class="sample-summary">{description['summary']}</div>
+                        <div class="sample-lookfor"><strong>Look for:</strong> {description['look_for']}</div>
                     </div>
                 </div>
                 """,
@@ -549,12 +598,6 @@ def run_analysis(file_source: object, file_name: str) -> None:
         "prompt_input": prompt_input,
         "diagnosis": diagnosis,
     }
-
-
-def build_issue_badge(issue_type: str) -> str:
-    meta = ISSUE_META.get(issue_type, ISSUE_META["insufficient_evidence"])
-    return f"<span class='issue-badge {meta['class']}'>{meta['label']}</span>"
-
 
 def dataframe_from_records(records: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(records) if records else pd.DataFrame()
@@ -805,18 +848,6 @@ def styled_figure(fig: go.Figure, height: int = 360) -> go.Figure:
     )
     return fig
 
-
-def render_chart_note(text: str) -> None:
-    st.markdown(
-        f"""
-        <div class="pill-note" style="margin-top:0;margin-bottom:0.8rem;">
-            {text}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def render_station_hour_heatmap(chart_data: dict) -> bool:
     station_hour = dataframe_from_records(chart_data.get("station_hour_heatmap", []))
     if station_hour.empty:
@@ -837,14 +868,8 @@ def render_station_hour_heatmap(chart_data: dict) -> bool:
         z="avg_delay",
         histfunc="avg",
         category_orders={"stop_id": station_order, "hour": hour_order},
-        color_continuous_scale=[
-            [0.0, "#0f172a"],
-            [0.25, "#1d4ed8"],
-            [0.5, "#38bdf8"],
-            [0.75, "#f59e0b"],
-            [1.0, "#ef4444"],
-        ],
-        title="Where Delay Concentrates by Station and Hour",
+        color_continuous_scale=CHART_PALETTE["heatmap_scale_stops"],
+        title="Where Delays Are Concentrated by Station and Time",
     )
     fig.update_traces(
         hovertemplate=(
@@ -858,13 +883,11 @@ def render_station_hour_heatmap(chart_data: dict) -> bool:
     fig.update_yaxes(title="")
     fig.update_coloraxes(colorbar_title="Avg delay")
     st.plotly_chart(styled_figure(fig, height=430), use_container_width=True)
-    render_chart_note("Use this first when OTP drops suddenly. It shows whether the problem is broad, localized, or concentrated in a time window.")
     return True
 
 
 def render_focus_trip_chart(chart_data: dict) -> bool:
     focus_profiles = dataframe_from_records(chart_data.get("focus_trip_profiles", []))
-    delay_jumps = dataframe_from_records(chart_data.get("delay_jump_events", []))
     if focus_profiles.empty:
         return False
 
@@ -874,8 +897,8 @@ def render_focus_trip_chart(chart_data: dict) -> bool:
         y="delay_min",
         color="trip_id",
         markers=True,
-        title="Delay Progression Across High-Change Trips",
-        color_discrete_sequence=["#60a5fa", "#f97316", "#34d399", "#f472b6"],
+        title="Trips With the Biggest Delay Changes",
+        color_discrete_sequence=CHART_PALETTE["comparison"],
         hover_data=["stop_id", "stop_label"],
     )
     fig.update_traces(
@@ -894,22 +917,11 @@ def render_focus_trip_chart(chart_data: dict) -> bool:
     fig.add_hline(
         y=5,
         line_dash="dash",
-        line_color="rgba(250,204,21,0.65)",
+        line_color=CHART_PALETTE["threshold"],
         annotation_text="5 min OTP threshold",
         annotation_position="top left",
     )
     st.plotly_chart(styled_figure(fig), use_container_width=True)
-
-    if not delay_jumps.empty:
-        significant = delay_jumps[delay_jumps["delay_jump_min"] >= 10]
-        if not significant.empty:
-            train_list = ", ".join(significant["trip_id"].astype(str).unique()[:6])
-            render_chart_note(f"Focus on trips with sudden delay jumps: {train_list}")
-        else:
-            biggest = delay_jumps.iloc[0]
-            render_chart_note(
-                f"Largest observed jump: {biggest['delay_jump_min']:.1f} min on {biggest['trip_id']}"
-            )
     return True
 
 
@@ -926,14 +938,9 @@ def render_delay_jump_chart(chart_data: dict) -> bool:
         x="delay_jump_min",
         y="segment_label",
         orientation="h",
-        title="Largest One-Stop Delay Jumps",
+        title="Biggest Delay Jumps Between Stops",
         color="severity",
-        color_discrete_map={
-            "minor": "#38bdf8",
-            "moderate": "#facc15",
-            "major": "#fb923c",
-            "critical": "#ef4444",
-        },
+        color_discrete_map=SEVERITY_COLOR_MAP,
         hover_data=["prev_stop_id", "current_stop_id", "prev_delay", "current_delay"],
     )
     fig.update_traces(
@@ -950,7 +957,6 @@ def render_delay_jump_chart(chart_data: dict) -> bool:
     fig.update_xaxes(title="Increase in delay (min)")
     fig.update_yaxes(title="")
     st.plotly_chart(styled_figure(fig), use_container_width=True)
-    render_chart_note("This is useful when delay jumps happen abruptly at one location rather than building gradually.")
     return True
 
 
@@ -977,9 +983,9 @@ def render_match_status_chart(chart_data: dict) -> bool:
         x="count",
         y=status_col,
         orientation="h",
-        title="Problematic Match Outcomes",
+        title="Records With Match Problems",
         color="share_percent",
-        color_continuous_scale=["#7f1d1d", "#ef4444", "#f59e0b"],
+        color_continuous_scale=CHART_PALETTE["alert_scale"],
         text="share_percent",
     )
     fig.update_traces(
@@ -996,7 +1002,6 @@ def render_match_status_chart(chart_data: dict) -> bool:
     fig.update_xaxes(title="Rows")
     fig.update_yaxes(title="")
     st.plotly_chart(styled_figure(fig), use_container_width=True)
-    render_chart_note("Only non-matched or problematic statuses are shown here because matched rows are not diagnostic.")
     return True
 
 
@@ -1019,9 +1024,9 @@ def render_avg_delay_trip_chart(chart_data: dict) -> bool:
         x="avg_delay",
         y=label_col,
         orientation="h",
-        title="Trips With Highest Average Delay",
+        title="Trips With the Highest Average Delay",
         color="avg_delay",
-        color_continuous_scale=["#1e3a8a", "#3b82f6", "#93c5fd"],
+        color_continuous_scale=CHART_PALETTE["core_scale"],
         hover_data=hover_cols,
     )
     hover_lines = [
@@ -1038,7 +1043,7 @@ def render_avg_delay_trip_chart(chart_data: dict) -> bool:
         hover_lines.append(f"Outliers: %{{customdata[{outlier_index}]}}")
     fig.update_traces(texttemplate="%{x:.1f}", textposition="outside")
     fig.update_traces(hovertemplate="<br>".join(hover_lines) + "<br><extra></extra>")
-    fig.add_vline(x=5, line_dash="dash", line_color="rgba(250,204,21,0.65)")
+    fig.add_vline(x=5, line_dash="dash", line_color=CHART_PALETTE["threshold"])
     fig.update_coloraxes(showscale=False)
     fig.update_xaxes(title="Average delay (min)")
     fig.update_yaxes(title="")
@@ -1064,9 +1069,9 @@ def render_avg_delay_station_chart(chart_data: dict) -> bool:
         x="avg_delay",
         y=label_col,
         orientation="h",
-        title="Stations With Highest Average Delay",
+        title="Stations With the Highest Average Delay",
         color="avg_delay",
-        color_continuous_scale=["#0f766e", "#14b8a6", "#67e8f9"],
+        color_continuous_scale=CHART_PALETTE["core_scale"],
         hover_data=available_columns(avg_station, ["record_count", "otp_percent", "outlier_count"]),
     )
     hover_cols = available_columns(avg_station, ["record_count", "otp_percent", "outlier_count"])
@@ -1082,7 +1087,7 @@ def render_avg_delay_station_chart(chart_data: dict) -> bool:
         hover_lines.append(f"Outliers: %{{customdata[{hover_cols.index('outlier_count')}]}}")
     fig.update_traces(texttemplate="%{x:.1f}", textposition="outside")
     fig.update_traces(hovertemplate="<br>".join(hover_lines) + "<br><extra></extra>")
-    fig.add_vline(x=5, line_dash="dash", line_color="rgba(250,204,21,0.65)")
+    fig.add_vline(x=5, line_dash="dash", line_color=CHART_PALETTE["threshold"])
     fig.update_coloraxes(showscale=False)
     fig.update_xaxes(title="Average delay (min)")
     fig.update_yaxes(title="")
@@ -1096,7 +1101,7 @@ def render_avg_delay_hour_chart(chart_data: dict) -> bool:
         return False
 
     x_col = "time_label" if "time_label" in avg_hour.columns else "hour"
-    title = "Average Delay by 15-Minute Window" if x_col == "time_label" else "Average Delay by Hour"
+    title = "Average Delay Over Time (15-Minute Windows)" if x_col == "time_label" else "Average Delay Over Time"
     fig = px.line(
         avg_hour,
         x=x_col,
@@ -1105,10 +1110,10 @@ def render_avg_delay_hour_chart(chart_data: dict) -> bool:
         title=title,
     )
     fig.update_traces(
-        line=dict(color="#93c5fd", width=3),
+        line=dict(color=CHART_PALETTE["core_scale"][2], width=3),
         marker=dict(size=8),
         fill="tozeroy",
-        fillcolor="rgba(96,165,250,0.12)",
+        fillcolor="rgba(56, 189, 248, 0.10)",
         hovertemplate=(
             ("Window: %{x}<br>" if x_col == "time_label" else "Hour: %{x}:00<br>")
             + "Average delay: %{y:.2f} min<br>"
@@ -1123,11 +1128,11 @@ def render_avg_delay_hour_chart(chart_data: dict) -> bool:
                     x=spike_hours[x_col],
                     y=spike_hours["avg_delay"],
                     mode="markers",
-                    marker=dict(size=12, color="#f472b6", symbol="diamond"),
+                    marker=dict(size=12, color=CHART_PALETTE["spike"], symbol="diamond"),
                     name="Spike window" if x_col == "time_label" else "Spike hour",
                 )
             )
-    fig.add_hline(x0=0, x1=1, y=5, line_dash="dash", line_color="rgba(250,204,21,0.65)")
+    fig.add_hline(x0=0, x1=1, y=5, line_dash="dash", line_color=CHART_PALETTE["threshold"])
     if x_col == "time_label":
         fig.update_xaxes(title="15-minute interval", type="category")
     else:
@@ -1157,9 +1162,9 @@ def render_otp_trip_chart(chart_data: dict) -> bool:
         x="otp_percent",
         y=label_col,
         orientation="h",
-        title="Trips With Lowest OTP",
+        title="Trips With the Lowest On-Time Performance",
         color="otp_percent",
-        color_continuous_scale=["#ef4444", "#f59e0b", "#22c55e"],
+        color_continuous_scale=CHART_PALETTE["otp_scale"],
         hover_data=hover_cols,
     )
     hover_lines = [
@@ -1175,7 +1180,7 @@ def render_otp_trip_chart(chart_data: dict) -> bool:
 
     fig.update_traces(texttemplate="%{x:.1f}%", textposition="outside")
     fig.update_traces(hovertemplate="<br>".join(hover_lines) + "<br><extra></extra>")
-    fig.add_vline(x=90, line_dash="dash", line_color="rgba(250,204,21,0.65)")
+    fig.add_vline(x=90, line_dash="dash", line_color=CHART_PALETTE["threshold"])
     fig.update_coloraxes(showscale=False)
     fig.update_xaxes(title="OTP (%)", range=[0, 100])
     fig.update_yaxes(title="")
@@ -1201,9 +1206,9 @@ def render_otp_station_chart(chart_data: dict) -> bool:
         x="otp_percent",
         y=label_col,
         orientation="h",
-        title="Stations With Lowest OTP",
+        title="Stations With the Lowest On-Time Performance",
         color="otp_percent",
-        color_continuous_scale=["#ef4444", "#f59e0b", "#22c55e"],
+        color_continuous_scale=CHART_PALETTE["otp_scale"],
         hover_data=available_columns(otp_station, ["record_count", "avg_delay", "outlier_count"]),
     )
     hover_cols = available_columns(otp_station, ["record_count", "avg_delay", "outlier_count"])
@@ -1219,7 +1224,7 @@ def render_otp_station_chart(chart_data: dict) -> bool:
         hover_lines.append(f"Outliers: %{{customdata[{hover_cols.index('outlier_count')}]}}")
     fig.update_traces(texttemplate="%{x:.1f}%", textposition="outside")
     fig.update_traces(hovertemplate="<br>".join(hover_lines) + "<br><extra></extra>")
-    fig.add_vline(x=90, line_dash="dash", line_color="rgba(250,204,21,0.65)")
+    fig.add_vline(x=90, line_dash="dash", line_color=CHART_PALETTE["threshold"])
     fig.update_coloraxes(showscale=False)
     fig.update_xaxes(title="OTP (%)", range=[0, 100])
     fig.update_yaxes(title="")
@@ -1240,9 +1245,9 @@ def render_missing_stop_chart(chart_data: dict) -> bool:
         x="missing_stops",
         y="trip_id",
         orientation="h",
-        title="Trips With Missing Stop Sequences",
+        title="Trips With Missing Stops",
         color="missing_stops",
-        color_continuous_scale=["#1d4ed8", "#f59e0b", "#ef4444"],
+        color_continuous_scale=CHART_PALETTE["alert_scale"],
         hover_data=["observed_stops", "expected_stops"],
     )
     fig.update_traces(
@@ -1260,7 +1265,6 @@ def render_missing_stop_chart(chart_data: dict) -> bool:
     fig.update_xaxes(title="Missing stop count")
     fig.update_yaxes(title="")
     st.plotly_chart(styled_figure(fig), use_container_width=True)
-    render_chart_note("This is the clearest view when the issue is dropped or incomplete records inside trips.")
     return True
 
 
@@ -1277,9 +1281,9 @@ def render_missing_values_chart(pre_analysis: dict) -> bool:
         x="missing_count",
         y="column",
         orientation="h",
-        title="Missing Values by Column",
+        title="Columns With Missing Records",
         color="missing_percent",
-        color_continuous_scale=["#1d4ed8", "#f59e0b", "#ef4444"],
+        color_continuous_scale=CHART_PALETTE["alert_scale"],
     )
     fig.update_traces(
         texttemplate="%{x}",
@@ -1312,15 +1316,9 @@ def render_delay_distribution_chart(chart_data: dict) -> bool:
         delay_distribution,
         x="label",
         y="count",
-        title="Delay Distribution Across All Records",
+        title="How Delay Is Distributed Across Records",
         color="severity_midpoint",
-        color_continuous_scale=[
-            [0.0, "#22c55e"],
-            [0.25, "#84cc16"],
-            [0.5, "#f59e0b"],
-            [0.75, "#f97316"],
-            [1.0, "#ef4444"],
-        ],
+        color_continuous_scale=CHART_PALETTE["distribution_scale_stops"],
     )
     fig.update_traces(
         hovertemplate=(
@@ -1366,7 +1364,6 @@ def render_visual_section(title: str, description: str, panels: list[callable]) 
 
 def render_visuals(pre_analysis: dict, diagnosis: dict) -> None:
     chart_data = pre_analysis["chart_ready_outputs"]
-    issue_type = diagnosis["likely_issue_type"]
 
     st.markdown(
         f"""
@@ -1418,8 +1415,7 @@ def render_visuals(pre_analysis: dict, diagnosis: dict) -> None:
         st.markdown(
             f"""
             <div class="empty-state">
-                No chart-ready summaries were available for this file. The current diagnosis is
-                <strong>{ISSUE_META.get(issue_type, ISSUE_META['insufficient_evidence'])['label']}</strong>.
+                No chart-ready summaries were available for this file.
             </div>
             """,
             unsafe_allow_html=True,
@@ -1427,44 +1423,38 @@ def render_visuals(pre_analysis: dict, diagnosis: dict) -> None:
 
 
 def render_overview(pre_analysis: dict, diagnosis: dict) -> None:
-    metrics = pre_analysis["performance_metrics"]
-    issue_type = diagnosis["likely_issue_type"]
     if diagnosis.get("source") == "vertex_unavailable":
         st.error(diagnosis.get("warning", "Vertex AI analysis failed."))
-        render_metric_grid(
-            pre_analysis,
-            {
-                "likely_issue_type": "insufficient_evidence",
-            },
-        )
+        render_metric_grid(pre_analysis, diagnosis)
         return
 
-    summary = " ".join(str(diagnosis.get("analysis", "")).split())
+    analysis = str(diagnosis.get("analysis", "")).strip()
+    file_name = pre_analysis["file_info"]["file_name"]
+    scenario_title = SAMPLE_DESCRIPTIONS.get(
+        file_name,
+        {"title": file_name.replace(".csv", "").replace(".xlsx", "").replace("_", " ").title()},
+    )["title"]
     st.markdown(
         f"""
         <div class="overview-panel">
-            <div class="overview-kicker">Diagnosis Summary</div>
-            <div class="status-strip" style="margin-top:0;margin-bottom:0.8rem;">
-                {build_issue_badge(issue_type)}
-                <span class="pill-note">Source: {diagnosis.get('source', 'vertex_ai').replace('_', ' ').title()}</span>
-            </div>
-            <div class="overview-summary">{summary}</div>
+            <div class="overview-kicker">What {scenario_title} Tells You</div>
+            <div class="overview-summary">{analysis}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     render_metric_grid(pre_analysis, diagnosis)
 
-    left, right = st.columns([1.1, 0.9])
+    left, right = st.columns([1.05, 0.95])
     with left:
-        hypotheses = diagnosis["top_hypotheses"][:3]
+        what_happened = diagnosis.get("what_happened", [])[:3]
         st.markdown(
             """
             <div class="list-card">
-                <div class="section-title">Top Hypotheses</div>
+                <div class="section-title">What Happened</div>
                 <ul>
             """
-            + "".join(f"<li>{item}</li>" for item in hypotheses)
+            + "".join(f"<li>{item}</li>" for item in what_happened)
             + """
                 </ul>
             </div>
@@ -1486,83 +1476,6 @@ def render_overview(pre_analysis: dict, diagnosis: dict) -> None:
             """,
             unsafe_allow_html=True,
         )
-
-
-def render_analysis(pre_analysis: dict, diagnosis: dict) -> None:
-    python_findings = build_python_findings(pre_analysis)
-    trip_highlights = build_segment_highlights(pre_analysis, "by_trip")
-    station_highlights = build_segment_highlights(pre_analysis, "by_station")
-    hour_highlights = build_segment_highlights(pre_analysis, "by_hour")
-    direction_highlights = build_segment_highlights(pre_analysis, "by_direction")
-    if diagnosis.get("source") == "vertex_unavailable":
-        st.error(diagnosis.get("warning", "Vertex AI analysis failed."))
-        st.markdown(
-            """
-            <div class="pill-note" style="margin-top:1rem;margin-bottom:1rem;">
-                No Vertex diagnosis was returned for this run.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        findings_html = "".join(f"<li>{item}</li>" for item in python_findings)
-        st.markdown(
-            f"""
-            <div class="list-card" style="margin-top: 1rem;">
-                <div class="section-title">Dataset Summary</div>
-                <ul>{findings_html}</ul>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    st.markdown(
-        f"""
-        <div class="section-card">
-            <div class="section-title">Vertex Root-Cause Analysis</div>
-            <div class="status-strip">
-                {build_issue_badge(diagnosis['likely_issue_type'])}
-                <span class="pill-note">Source: {diagnosis.get('source', 'rule_based').replace('_', ' ').title()}</span>
-            </div>
-            <p class="insight-copy">{diagnosis['analysis']}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        """
-        <div class="pill-note" style="margin-top:1rem;margin-bottom:1rem;">
-            Python evidence is organized by segment so you can inspect train, station, and time patterns before deciding on root cause.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    seg_cols = st.columns(3, gap="medium")
-    with seg_cols[0]:
-        render_segment_card("Train Segment", trip_highlights)
-    with seg_cols[1]:
-        render_segment_card("Station Segment", station_highlights)
-    with seg_cols[2]:
-        render_segment_card("Time Segment", hour_highlights)
-
-    if direction_highlights:
-        render_segment_card("Direction Segment", direction_highlights)
-
-    findings_html = "".join(f"<li>{item}</li>" for item in python_findings)
-    st.markdown(
-        f"""
-        <div class="list-card" style="margin-top: 1rem;">
-            <div class="section-title">Dataset Summary</div>
-            <ul>{findings_html}</ul>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if diagnosis.get("warning"):
-        st.warning(diagnosis["warning"])
 
 
 def render_raw_data(frame: pd.DataFrame, file_name: str, prompt_input: str | None = None) -> None:

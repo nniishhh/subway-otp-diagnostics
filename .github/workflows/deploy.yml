@@ -1,0 +1,65 @@
+name: Deploy To Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ secrets.GCP_REGION }}
+      GCP_SERVICE_NAME: ${{ secrets.GCP_SERVICE_NAME }}
+      GCP_ARTIFACT_REPO: subway-otp-diagnostics
+      VERTEXAI_LOCATION: global
+      VERTEXAI_MODEL: gemini-3-flash-preview
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Derive service account email
+        shell: bash
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          GCP_SERVICE_ACCOUNT_EMAIL=$(python3 -c 'import json, os; print(json.loads(os.environ["GCP_SA_KEY"])["client_email"])')
+          echo "GCP_SERVICE_ACCOUNT_EMAIL=${GCP_SERVICE_ACCOUNT_EMAIL}" >> "$GITHUB_ENV"
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build container image
+        shell: bash
+        run: |
+          IMAGE_URI="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GCP_ARTIFACT_REPO}/${GCP_SERVICE_NAME}:${GITHUB_SHA}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+          docker build -t "${IMAGE_URI}" .
+
+      - name: Push container image
+        run: docker push "${IMAGE_URI}"
+
+      - name: Deploy to Cloud Run
+        shell: bash
+        run: |
+          gcloud run deploy "${GCP_SERVICE_NAME}" \
+            --image "${IMAGE_URI}" \
+            --region "${GCP_REGION}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --service-account "${GCP_SERVICE_ACCOUNT_EMAIL}" \
+            --set-env-vars "VERTEXAI_PROJECT=${GCP_PROJECT_ID},VERTEXAI_LOCATION=${VERTEXAI_LOCATION},VERTEXAI_MODEL=${VERTEXAI_MODEL}"

@@ -17,23 +17,13 @@ load_dotenv()
 RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
-        "likely_issue_type": {
-            "type": "STRING",
-            "enum": [
-                "data_quality",
-                "measurement_logic",
-                "real_operations",
-                "insufficient_evidence",
-            ],
-        },
         "analysis": {"type": "STRING"},
-        "top_hypotheses": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "what_happened": {"type": "ARRAY", "items": {"type": "STRING"}},
         "recommended_next_steps": {"type": "ARRAY", "items": {"type": "STRING"}},
     },
     "required": [
-        "likely_issue_type",
         "analysis",
-        "top_hypotheses",
+        "what_happened",
         "recommended_next_steps",
     ],
 }
@@ -41,9 +31,8 @@ RESPONSE_SCHEMA = {
 
 def unavailable_diagnosis(error_message: str) -> dict:
     return {
-        "likely_issue_type": "insufficient_evidence",
         "analysis": "",
-        "top_hypotheses": [],
+        "what_happened": [],
         "recommended_next_steps": [],
         "source": "vertex_unavailable",
         "warning": error_message,
@@ -54,6 +43,10 @@ def normalize_diagnosis(payload: dict) -> dict:
     diagnosis = dict(payload)
     if "analysis" not in diagnosis and "short_explanation" in diagnosis:
         diagnosis["analysis"] = diagnosis.pop("short_explanation")
+    if "what_happened" not in diagnosis and "top_hypotheses" in diagnosis:
+        diagnosis["what_happened"] = diagnosis.pop("top_hypotheses")
+    diagnosis.pop("likely_issue_type", None)
+    diagnosis.setdefault("what_happened", [])
     diagnosis.pop("confidence", None)
     diagnosis["source"] = "vertex_ai"
     return diagnosis
