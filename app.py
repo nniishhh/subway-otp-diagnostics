@@ -447,7 +447,7 @@ def render_hero() -> None:
                 This app analyzes subway on-time performance scenarios and helps explain whether the pattern looks like
                 isolated extreme delays, a recurring bottleneck, a schedule-vs-actual mismatch, missing trip records,
                 or a broader network slowdown. It works by running a Python pre-analysis first, then sending the structured
-                findings to Vertex AI for interpretation.
+                findings to Gemini for interpretation.
             </p>
         </div>
         """,
@@ -586,7 +586,7 @@ def get_active_file(sample_path: Path | None) -> tuple[object | None, str | None
 
 
 def run_analysis(file_source: object, file_name: str) -> None:
-    with st.spinner("Running pre-analysis and preparing the Vertex AI prompt..."):
+    with st.spinner("Running pre-analysis and preparing the Gemini prompt..."):
         frame, metadata = load_dataframe(file_source, file_name)
         pre_analysis = run_pre_analysis(frame, metadata["file_name"])
         prompt_input = build_diagnosis_prompt(pre_analysis)
@@ -1424,7 +1424,7 @@ def render_visuals(pre_analysis: dict, diagnosis: dict) -> None:
 
 def render_overview(pre_analysis: dict, diagnosis: dict) -> None:
     if diagnosis.get("source") == "vertex_unavailable":
-        st.error(diagnosis.get("warning", "Vertex AI analysis failed."))
+        st.error(diagnosis.get("warning", "Gemini analysis failed."))
         render_metric_grid(pre_analysis, diagnosis)
         return
 
@@ -1489,7 +1489,7 @@ def render_raw_data(frame: pd.DataFrame, file_name: str, prompt_input: str | Non
         use_container_width=False,
     )
     if prompt_input:
-        with st.expander("Prompt Input Sent To Vertex"):
+        with st.expander("Prompt Input Sent To Gemini"):
             escaped_prompt = (
                 str(prompt_input)
                 .replace("&", "&amp;")

@@ -30,7 +30,6 @@ def prompt_payload(pre_analysis: dict) -> dict:
     file_info = dict(payload.get("file_info", {}))
     file_info.pop("file_name", None)
     payload["file_info"] = file_info
-    payload.pop("evidence_summary", None)
     return payload
 
 

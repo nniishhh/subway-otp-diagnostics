@@ -21,12 +21,6 @@ DIMENSION_CANDIDATES = {
     "scheduled_arrival": ["scheduled_arrival", "scheduled_time_full", "scheduled_datetime"],
     "actual_arrival": ["actual_arrival", "actual_time_full", "actual_datetime"],
 }
-ISSUE_TYPES = [
-    "data_quality",
-    "measurement_logic",
-    "real_operations",
-    "insufficient_evidence",
-]
 
 
 def normalize_name(name: str) -> str:
@@ -610,9 +604,6 @@ def build_diagnostic_checks(
 
     extreme_outlier_bonus = 0.18 if max_delay >= 15 and otp_percent >= 95 else 0.0
     sensor_score = min(
-        1.0, max(outlier_share * 10, 0) * max(0.2, 1 - elevated_trip_share) * (1 if otp_percent >= 80 else 0.7)
-    )
-    sensor_score = min(
         1.0,
         (
             (outlier_share * 14) + extreme_outlier_bonus
@@ -732,124 +723,6 @@ def build_diagnostic_checks(
     }
 
 
-def build_rule_based_diagnosis(
-    metrics: dict[str, Any], diagnostic_checks: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
-    insufficient_score = diagnostic_checks["insufficient_evidence"]["score"]
-    issue_scores = {
-        "data_quality": max(
-            diagnostic_checks["missing_records"]["score"],
-            min(
-                1.0,
-                (diagnostic_checks["missing_records"]["score"] * 0.8)
-                + (diagnostic_checks["quality_pressure"]["score"] * 0.2),
-            ),
-        ),
-        "measurement_logic": min(
-            1.0,
-            max(
-                diagnostic_checks["join_mapping_quality"]["score"],
-                (diagnostic_checks["sensor_anomaly"]["score"] * 1.0)
-                + (diagnostic_checks["service_pattern_mismatch"]["score"] * 0.25),
-                (diagnostic_checks["service_pattern_mismatch"]["score"] * 0.95)
-                + (diagnostic_checks["sensor_anomaly"]["score"] * 0.15),
-            ),
-        ),
-        "real_operations": diagnostic_checks["operational_disruption"]["score"],
-        "insufficient_evidence": insufficient_score,
-    }
-
-    if insufficient_score >= 0.85:
-        likely_issue_type = "insufficient_evidence"
-    else:
-        likely_issue_type = max(
-            [issue for issue in ISSUE_TYPES if issue != "insufficient_evidence"],
-            key=lambda issue: issue_scores[issue],
-        )
-        if issue_scores[likely_issue_type] < 0.35:
-            likely_issue_type = "insufficient_evidence"
-
-    sorted_scores = sorted(issue_scores.items(), key=lambda item: item[1], reverse=True)
-    top_score = sorted_scores[0][1]
-    runner_up = sorted_scores[1][1]
-    confidence = max(0.35, min(0.95, top_score * 0.75 + (top_score - runner_up) * 0.5 + 0.25))
-
-    explanations = {
-        "data_quality": (
-            "Python found evidence of incomplete or unreliable records. "
-            "Taken together, this points more to data quality problems than true service performance."
-        ),
-        "measurement_logic": (
-            "Python found patterns that look more like matching, mapping, or measurement artifacts than a broad operating problem. "
-            "Taken together, this points to measurement logic."
-        ),
-        "real_operations": (
-            "Python found delay elevated across a broader portion of the network rather than in a few isolated records. "
-            "Taken together, this points to a real operational disruption."
-        ),
-        "insufficient_evidence": (
-            "Python found some signals, but the file does not provide enough reliable structure to support a strong root-cause call yet."
-        ),
-    }
-
-    next_steps = {
-        "data_quality": [
-            "Inspect missing values, duplicate keys, and stop-sequence gaps before trusting OTP trends.",
-            "Validate the feed window and confirm whether rows were dropped during ingestion.",
-            "Re-run the analysis after filling or removing clearly broken records.",
-        ],
-        "measurement_logic": [
-            "Review how records are matched to schedules and whether match_status values are trustworthy.",
-            "Inspect station-level repeat patterns and extreme outliers for sensor or mapping errors.",
-            "Compare against a known-good subset to isolate logic differences from true delays.",
-        ],
-        "real_operations": [
-            "Check the worst trips, stations, and hours to identify where the disruption concentrated.",
-            "Compare the disruption window against service advisories, incidents, or dispatch notes.",
-            "Use the high-delay segments to estimate operational impact and rider-facing OTP loss.",
-        ],
-        "insufficient_evidence": [
-            "Provide delay_min plus trip or station identifiers if available.",
-            "Include a timestamp or date-time field so patterns can be checked over time.",
-            "Use a larger or more complete extract before making a final call.",
-        ],
-    }
-
-    if likely_issue_type == "data_quality":
-        top_hypotheses = [
-            "Missing values, stop-sequence gaps, or broken datetime parsing suggest the feed may be incomplete.",
-            "Data hygiene issues should be resolved before interpreting OTP as a true service outcome.",
-            "Observed delay patterns may be partly caused by dropped or malformed records.",
-        ]
-    elif likely_issue_type == "measurement_logic":
-        top_hypotheses = [
-            "The pattern looks concentrated or abrupt rather than broad-based, which is consistent with a logic or matching artifact.",
-            "Schedule joins or stop-pattern alignment may be distorting the apparent delay story.",
-            "A subset of rows may be driving the anomaly instead of a true network slowdown.",
-        ]
-    elif likely_issue_type == "real_operations":
-        top_hypotheses = [
-            "Delay appears elevated across multiple parts of the network rather than in a few isolated records.",
-            "The OTP drop is more consistent with a real operating slowdown than with a narrow data artifact.",
-            "The highest-impact stations, trains, and hours should be reviewed as the operational concentration points.",
-        ]
-    else:
-        top_hypotheses = [
-            "The file does not provide enough reliable structure for a confident root-cause explanation.",
-            "More complete identifiers or time context would make the diagnosis stronger.",
-        ]
-
-    return {
-        "likely_issue_type": likely_issue_type,
-        "confidence": round(confidence, 2),
-        "short_explanation": explanations[likely_issue_type],
-        "top_hypotheses": top_hypotheses,
-        "recommended_next_steps": next_steps[likely_issue_type],
-        "issue_scores": {key: clean_score(value) for key, value in issue_scores.items()},
-        "otp_percent": metrics.get("otp_percent"),
-    }
-
-
 def run_pre_analysis(frame: pd.DataFrame, file_name: str) -> dict[str, Any]:
     working = frame.copy()
     dimensions = detect_dimensions(working)
@@ -937,25 +810,27 @@ def run_pre_analysis(frame: pd.DataFrame, file_name: str) -> dict[str, Any]:
         delay_jump_events,
     )
 
+    has_delay_data = delay_series is not None and delay_series.notna().any()
+
     metrics = {
         "record_count": int(len(working)),
         "column_count": int(len(working.columns)),
         "trip_count": int(working[dimensions["trip_id"]].nunique()) if dimensions["trip_id"] else None,
         "station_count": int(working[dimensions["stop_id"]].nunique()) if dimensions["stop_id"] else None,
         "otp_percent": round(float(delay_series.le(5).mean() * 100), 2)
-        if delay_series is not None and delay_series.notna().any()
+        if has_delay_data
         else None,
         "avg_delay": round(float(delay_series.mean()), 2)
-        if delay_series is not None and delay_series.notna().any()
+        if has_delay_data
         else None,
         "median_delay": round(float(delay_series.median()), 2)
-        if delay_series is not None and delay_series.notna().any()
+        if has_delay_data
         else None,
         "std_delay": round(float(delay_series.std()), 2)
-        if delay_series is not None and delay_series.notna().any()
+        if has_delay_data
         else None,
         "max_delay": round(float(delay_series.max()), 2)
-        if delay_series is not None and delay_series.notna().any()
+        if has_delay_data
         else None,
         "outlier_count": int(outlier_mask.sum()) if delay_series is not None else 0,
         "outlier_share": round(float(outlier_mask.mean()), 4) if delay_series is not None else 0.0,
@@ -986,7 +861,6 @@ def run_pre_analysis(frame: pd.DataFrame, file_name: str) -> dict[str, Any]:
         match_status_summary,
         stop_gap_summary,
     )
-    evidence_summary = build_rule_based_diagnosis(metrics, diagnostic_checks)
 
     avg_delay_by_time = time_window_summary[
         ["time_label", "avg_delay", "record_count", "otp_percent", "outlier_count"]
@@ -1068,5 +942,4 @@ def run_pre_analysis(frame: pd.DataFrame, file_name: str) -> dict[str, Any]:
             "match_status_breakdown": to_serializable_records(match_status_summary),
             "missing_stop_sequence_summary": to_serializable_records(stop_gap_summary, limit=20),
         },
-        "evidence_summary": evidence_summary,
     }
