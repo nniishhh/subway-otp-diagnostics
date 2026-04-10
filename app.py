@@ -558,7 +558,7 @@ def render_sample_selector() -> tuple[Path | None, bool]:
     st.markdown(
         """
         <div class="pill-note" style="margin-top:-0.15rem;margin-bottom:1rem;">
-            Pick one of the five scenario files below to run the analysis immediately.
+            Pick one of the five generated scenario files below to run the analysis immediately. These synthetic datasets were created to mimic common subway delay patterns.
         </div>
         """,
         unsafe_allow_html=True,
