@@ -4,8 +4,6 @@ A Streamlit app for diagnosing subway on-time performance issues with visual dia
 
 The app runs a structured Python pre-analysis first, then sends the summarized evidence to Vertex AI (Gemini 3 Flash) for interpretation.
 
-Live app:
-https://subway-otp-diagnostics-885256127561.us-east1.run.app/
 
 ## What It Does
 
@@ -40,7 +38,7 @@ GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/credentials.json
 2. Install and run
 
 ```bash
-cd "/Users/happynish/Desktop/Columbia/Agentic AI/MTA Delay Analysis"
+cd subway-otp-diagnostics
 UV_CACHE_DIR=/tmp/uv-cache uv run --with-requirements requirements.txt streamlit run app.py
 ```
 
