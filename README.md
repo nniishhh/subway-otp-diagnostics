@@ -5,6 +5,9 @@ A Streamlit app for diagnosing subway on-time performance issues with visual dia
 The app runs a structured Python pre-analysis first, then sends the summarized evidence to Vertex AI (Gemini 3 Flash) for interpretation.
 
 
+Live app:
+https://subway-otp-diagnostics-887632861495.us-east1.run.app/
+
 ## What It Does
 
 - analyzes synthetic subway OTP scenarios from `sample_data/`
